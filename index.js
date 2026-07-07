@@ -14,16 +14,11 @@ const Stripe = require('stripe');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const uri = process.env.MONGODB_URI;
-const port = process.env.PORT || 5000;
+const port = process.env.PORT;
 const app = express();
 
 // --- middleware ---
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL,
-    credentials: true,
-  }),
-);
+app.use(cors());
 app.use(express.json());
 
 const client = new MongoClient(uri, {
@@ -73,7 +68,7 @@ module.exports = protect;
 async function run() {
   try {
     // Connect the client to the server (optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const db = client.db('quicktask_db');
     const tasksCollection = db.collection('tasks');
