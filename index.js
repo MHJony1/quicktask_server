@@ -10,8 +10,8 @@ const { createRemoteJWKSet, jwtVerify } = require('jose-cjs');
 
 dotenv.config();
 
-// const Stripe = require('stripe');
-// const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const Stripe = require('stripe');
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const uri = process.env.MONGODB_URI;
 const port = process.env.PORT || 5000;
@@ -20,8 +20,8 @@ const app = express();
 // --- middleware ---
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
-    credentials: true, // needed so the Better Auth session cookie is sent cross-origin
+    origin: process.env.CLIENT_URL,
+    credentials: true,
   }),
 );
 app.use(express.json());
@@ -88,7 +88,15 @@ async function run() {
         }
 
         const userId = req.user.id;
-        const isPremium = Boolean(req.user.isPremium);
+
+        // Fetch the latest user from DB instead of relying purely on JWT
+        let user;
+        try {
+          user = await db.collection('user').findOne({ _id: new ObjectId(userId) });
+        } catch (e) {
+          user = await db.collection('user').findOne({ id: userId });
+        }
+        const isPremium = Boolean(user?.isPremium);
 
         // Free-tier limit: max 3 tasks
         if (!isPremium) {
@@ -105,7 +113,7 @@ async function run() {
           title: title.trim(),
           description: description ? description.trim() : '',
           status: VALID_STATUSES.includes(status) ? status : 'To Do',
-          userId, // <-- ties the task to its owner
+          userId,
           createdAt: new Date(),
         };
 
@@ -120,7 +128,7 @@ async function run() {
     // 2. Read all tasks belonging to the logged-in user (get)
     app.get('/tasks', protect, async (req, res) => {
       try {
-        const query = { userId: req.user.id }; // <-- only this user's tasks
+        const query = { userId: req.user.id };
         const result = await tasksCollection
           .find(query)
           .sort({ createdAt: -1 })
@@ -237,6 +245,113 @@ async function run() {
       } catch (error) {
         console.error('Delete task error:', error.message);
         res.status(500).json({ message: 'Failed to delete task' });
+      }
+    });
+
+    // 5.5 Get fresh user data (get)
+    app.get('/users/me', protect, async (req, res) => {
+      try {
+        const userId = req.user.id;
+        let user;
+        try {
+          user = await db.collection('user').findOne({ _id: new ObjectId(userId) });
+        } catch (e) {
+          user = await db.collection('user').findOne({ id: userId });
+        }
+
+        if (!user) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+
+        res.json({
+          id: user.id || user._id.toString(),
+          name: user.name,
+          email: user.email,
+          isPremium: Boolean(user.isPremium)
+        });
+      } catch (error) {
+        console.error('Get user error:', error.message);
+        res.status(500).json({ message: 'Failed to fetch user' });
+      }
+    });
+
+    // 6. Create Stripe Checkout Session (Updated)
+    app.post('/create-checkout-session', protect, async (req, res) => {
+      try {
+        const userId = req.user.id;
+
+        const user = await db.collection('user').findOne({ _id: new ObjectId(userId) });
+
+        if (!user) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ['card'],
+          mode: 'payment',
+          customer_email: user.email,
+          line_items: [
+            {
+              price_data: {
+                currency: 'usd',
+                product_data: {
+                  name: 'QuickTask Premium',
+                  description: 'Unlock Unlimited Tasks',
+                },
+                unit_amount: 500,
+              },
+              quantity: 1,
+            },
+          ],
+          success_url: `${process.env.CLIENT_URL}/dashboard?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_URL}/dashboard?cancel=true`,
+          client_reference_id: userId,
+        });
+
+        res.json({ url: session.url });
+      } catch (error) {
+        console.error('Stripe checkout error:', error.message);
+        res.status(500).json({ message: 'Failed to create checkout session' });
+      }
+    });
+
+    // 7. Verify Payment (Updated)
+    app.post('/verify-payment', protect, async (req, res) => {
+      try {
+        const { sessionId } = req.body;
+        if (!sessionId) return res.status(400).json({ message: 'Session ID is required' });
+
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        if (session.client_reference_id !== req.user.id) {
+          return res.status(403).json({ message: 'This payment session does not belong to you' });
+        }
+
+        if (session.payment_status === 'paid') {
+          const userId = req.user.id;
+          const filter = { _id: new ObjectId(userId) };
+
+          await db.collection('user').updateOne(
+            filter,
+            { $set: { isPremium: true, premiumActivatedAt: new Date() } }
+          );
+
+          const updatedUser = await db.collection('user').findOne(filter);
+
+          return res.json({
+            success: true,
+            user: {
+              id: updatedUser.id || updatedUser._id.toString(),
+              name: updatedUser.name,
+              email: updatedUser.email,
+              isPremium: Boolean(updatedUser.isPremium),
+            },
+          });
+        }
+        return res.status(400).json({ message: 'Payment not completed' });
+      } catch (error) {
+        console.error('Verify payment error:', error.message);
+        res.status(500).json({ message: 'Failed to verify payment' });
       }
     });
 
