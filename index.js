@@ -48,10 +48,7 @@ async function protect(req, res, next) {
 
     const token = authHeader.split(' ')[1];
 
-    const { payload } = await jwtVerify(token, JWKS, {
-      issuer: process.env.CLIENT_URL,
-      audience: process.env.CLIENT_URL,
-    });
+    const { payload } = await jwtVerify(token, JWKS);
 
     req.user = payload;
     next();
@@ -63,7 +60,7 @@ async function protect(req, res, next) {
   }
 }
 
-module.exports = protect;
+
 
 async function run() {
   try {
@@ -372,3 +369,6 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
+
+
+module.exports = app;
